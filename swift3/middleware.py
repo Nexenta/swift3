@@ -271,10 +271,11 @@ def canonical_string(req):
         path += '?' + req.query_string
     if '?' in path:
         path, args = path.split('?', 1)
-        for key in urlparse.parse_qs(args, keep_blank_values=True):
+        for key, value in urlparse.parse_qsl(args, keep_blank_values=True):
             if key in ('acl', 'logging', 'torrent', 'location', 'versions',
-                       'requestPayment', 'versioning'):
-                return "%s%s?%s" % (buf, path, key)
+                       'requestPayment', 'versioning', 'versionId'):
+                param = '%s=%s' % (key, value) if value else key
+                return "%s%s?%s" % (buf, path, param)
     return buf + path
 
 
@@ -429,6 +430,8 @@ class BucketController(WSGIContext):
         if 'acl' not in args:
             # acl request sent with format=json etc confuses swift
             env['QUERY_STRING'] = 'format=json&limit=%s' % (max_keys + 1)
+        if 'versions' in args:
+            env['QUERY_STRING'] += 'versions'
         if 'marker' in args:
             env['QUERY_STRING'] += '&marker=%s' % quote(args['marker'])
         if 'prefix' in args:
