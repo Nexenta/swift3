@@ -72,8 +72,7 @@ from swift.common.http import HTTP_OK, HTTP_CREATED, HTTP_ACCEPTED, \
     HTTP_NO_CONTENT, HTTP_BAD_REQUEST, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, \
     HTTP_NOT_FOUND, HTTP_CONFLICT, HTTP_UNPROCESSABLE_ENTITY, is_success, \
     HTTP_NOT_IMPLEMENTED, HTTP_LENGTH_REQUIRED
-from swift.common.middleware.s3acl import ANONYMOUS_USERNAME,\
-    AUTHENTICATED_USERNAME
+from swift.common.middleware.s3acl import AUTHENTICATED_USERNAME
 
 
 MAX_BUCKET_LISTING = 1000
@@ -81,7 +80,7 @@ AMZ_ALL_USERS = 'http://acs.amazonaws.com/groups/global/AllUsers'
 AMZ_AUTHENTICATED_USERS =\
     'http://acs.amazonaws.com/groups/global/AuthenticatedUsers'
 REPLACE_USERNAMES = {
-    AMZ_ALL_USERS: ANONYMOUS_USERNAME,
+    AMZ_ALL_USERS: '.r:*',
     AMZ_AUTHENTICATED_USERS: AUTHENTICATED_USERNAME
 }
 
@@ -314,9 +313,9 @@ def get_s3_acl(headers, acl_headers, resource='container'):
                 # len(x-container-acl-) = 16; len(x-container-) = 12
                 frm = 16 if header.startswith('x-container-acl-') else 12
                 permission = header[frm:].upper().replace('-', '_')
-            elif resource == 'manifest':
-                # len(x-manifest-acl-) = 15
-                permission = header[15:].upper().replace('-', '_')
+            elif resource == 'object':
+                # len(x-object-acl-) = 13
+                permission = header[13:].upper().replace('-', '_')
             if permission:
                 referrers, groups = parse_acl(headers[header])
                 for ref in referrers:
@@ -390,13 +389,12 @@ def parse_access_control_policy(xml):
     return out
 
 
-def acp_to_headers(env, prefix):
+def acp_to_headers(env, resource):
     """
     Update env, add Swift ACL headers based on request body (wsgi.input).
 
     :param env: WSGI enviroment dict
-    :param prefix: prefix for ACL headers
-                  (HTTP_X_CONTAINER_ACL_|HTTP_X_OBJECT_ACL_)
+    :param resource: resource type object or container
     :returns : if any error occur return webob.Response object, else None
     """
     if 'wsgi.input' not in env:
@@ -405,18 +403,38 @@ def acp_to_headers(env, prefix):
         acp = parse_access_control_policy(env['wsgi.input'].read())
     except:
         return get_err_response('MalformedACLError')
-    permissions = {}
+    if resource == 'object':
+        permissions = {'HTTP_X_OBJECT_ACL_READ': [],
+                       'HTTP_X_OBJECT_ACL_WRITE': [],
+                       'HTTP_X_OBJECT_ACL_READ_ACP': [],
+                       'HTTP_X_OBJECT_ACL_WRITE_ACP': []}
+    elif resource == 'container':
+        permissions = {'HTTP_X_CONTAINER_READ': [],
+                       'HTTP_X_CONTAINER_ACL_READ': [],
+                       'HTTP_X_CONTAINER_WRITE': [],
+                       'HTTP_X_CONTAINER_ACL_READ_ACP': [],
+                       'HTTP_X_CONTAINER_ACL_WRITE_ACP': []}
     for user in acp.get('acl', []):
         username = user.get('user')
         if username:
-            for permission in user.get('permissions', []):
-                key = '%s%s' % (prefix, permission)
+            perms = user.get('permissions', [])
+            if 'FULL_CONTROL' in perms:
+                perms = ['READ', 'WRITE', 'READ_ACP', 'WRITE_ACP']
+            for permission in perms:
+                if resource == 'object':
+                    key = 'HTTP_X_OBJECT_ACL_' + permission
+                elif resource == 'container':
+                    if permission == 'WRITE':
+                        key = 'HTTP_X_CONTAINER_' + permission
+                    else:
+                        key = 'HTTP_X_CONTAINER_ACL_' + permission
                 if key not in permissions:
                     permissions[key] = []
                 if username in REPLACE_USERNAMES:
                     username = REPLACE_USERNAMES[username]
-                permissions[key].append(username)
-    for key, value in permissions.items():
+                if username not in permissions[key]:
+                    permissions[key].append(username)
+    for key, value in permissions.iteritems():
         env[key] = ','.join(value)
 
 
@@ -605,6 +623,8 @@ class BucketController(WSGIContext):
         if 'acl' not in args:
             # acl request sent with format=json etc confuses swift
             env['QUERY_STRING'] = 'format=json&limit=%s' % (max_keys + 1)
+        else:
+            env['REQUEST_METHOD'] = 'HEAD'
         if 'versions' in args:
             env['QUERY_STRING'] += '&versions'
         if 'marker' in args:
@@ -613,6 +633,7 @@ class BucketController(WSGIContext):
             env['QUERY_STRING'] += '&prefix=%s' % quote(args['prefix'])
         if 'delimiter' in args:
             env['QUERY_STRING'] += '&delimiter=%s' % quote(args['delimiter'])
+
         body_iter = self._app_call(env)
         status = self._get_status_int()
         headers = dict(self._response_headers)
@@ -761,57 +782,55 @@ class BucketController(WSGIContext):
         """
         Handle PUT Bucket request
         """
-        versioning = False
-        for key, value in env.items():
-            if key == "HTTP_X_AMZ_ACL":
-                # Translate the Amazon ACL to something that can be
-                # implemented in Swift, 501 otherwise. Swift uses POST
-                # for ACLs, whereas S3 uses PUT.
-                del env[key]
-                if 'QUERY_STRING' in env:
-                    del env['QUERY_STRING']
+        if 'CONTENT_LENGTH' in env:
+            try:
+                content_length = int(env['CONTENT_LENGTH'])
+            except (ValueError, TypeError):
+                return get_err_response('InvalidArgument')
+            if content_length < 0:
+                return get_err_response('InvalidArgument')
 
-                translated_acl = swift_acl_translate(value)
+        if 'QUERY_STRING' in env:
+            args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
+        else:
+            args = {}
+
+        acl = 'acl' in args
+        if acl:
+            res = acp_to_headers(env, 'container')
+            if res:
+                return res
+            env['REQUEST_METHOD'] = 'POST'
+
+        versioning = 'versioning' in args
+        if versioning:
+            if 'wsgi.input' not in env:
+                return get_err_response(
+                    'IllegalVersioningConfigurationException')
+            versioning_conf = env['wsgi.input'].read()
+            if 'Enabled' in versioning_conf:
+                env['HTTP_X_CONTAINER_VERSIONING'] = 'enabled'
+            elif 'Suspended' in versioning_conf:
+                env['HTTP_X_CONTAINER_VERSIONING'] = 'suspended'
+            else:
+                return get_err_response(
+                    'IllegalVersioningConfigurationException')
+            env['REQUEST_METHOD'] = 'POST'
+
+        if not acl and not versioning:
+            # Translate the Amazon ACL to something that can be
+            # implemented in Swift, 501 otherwise. Swift uses POST
+            # for ACLs, whereas S3 uses PUT.
+            if 'HTTP_X_AMZ_ACL' in env:
+                amz_acl = env['HTTP_X_AMZ_ACL']
+                del env['HTTP_X_AMZ_ACL']
+                translated_acl = swift_acl_translate(amz_acl)
                 if translated_acl == 'Unsupported':
                     return get_err_response('Unsupported')
                 elif translated_acl == 'InvalidArgument':
                     return get_err_response('InvalidArgument')
-
                 for header, acl in translated_acl:
                     env[header] = acl
-            if key == "CONTENT_LENGTH" and (value.isdigit() is False or
-                                            value < 0):
-                return get_err_response("InvalidArgument")
-            if key == "QUERY_STRING":
-                args = dict(urlparse.parse_qsl(value, 1))
-                if 'acl' in args and 'CONTENT_LENGTH' in env \
-                    and int(env['CONTENT_LENGTH']) > 0 and \
-                        'HTTP_X_AMZ_ACL' not in env:
-                    # We very likely have an XML-based ACL request
-                    body = env['wsgi.input'].readline().decode()
-                    translated_acl = swift_acl_translate(body, xml=True)
-                    if translated_acl == 'Unsupported':
-                        return get_err_response('Unsupported')
-                    elif translated_acl == 'InvalidArgument':
-                        return get_err_response('InvalidArgument')
-                    for header, acl in translated_acl:
-                        env[header] = acl
-                    env['REQUEST_METHOD'] = 'POST'
-                    env['QUERY_STRING'] = 'acl'
-                if 'versioning' in args:
-                    versioning = True
-                    if 'wsgi.input' not in env:
-                        return get_err_response(
-                            'IllegalVersioningConfigurationException')
-                    versioning_conf = env['wsgi.input'].read()
-                    if 'Enabled' in versioning_conf:
-                        env['HTTP_X_CONTAINER_VERSIONING'] = 'enabled'
-                    elif 'Suspended' in versioning_conf:
-                        env['HTTP_X_CONTAINER_VERSIONING'] = 'suspended'
-                    else:
-                        return get_err_response(
-                            'IllegalVersioningConfigurationException')
-                    env['REQUEST_METHOD'] = 'POST'
 
         body_iter = self._app_call(env)
         status = self._get_status_int()
@@ -886,6 +905,7 @@ class ObjectController(WSGIContext):
         env['QUERY_STRING'] = ''
         if 'acl' in args:
             env['QUERY_STRING'] += 'acl'
+            env['REQUEST_METHOD'] = 'HEAD'
         if 'versionId' in args:
             env['QUERY_STRING'] += 'versionId=%s' % args['versionId']
 
@@ -903,7 +923,8 @@ class ObjectController(WSGIContext):
             else:
                 args = {}
             if 'acl' in args:
-                return get_s3_acl(headers, obj_server.ACL_HEADERS, 'object')
+                resp = get_s3_acl(headers, obj_server.ACL_HEADERS, 'object')
+                return resp
 
             new_hdrs = {}
             for key, val in headers.iteritems():
@@ -938,23 +959,18 @@ class ObjectController(WSGIContext):
         """
         Handle PUT Object and PUT Object (Copy) request
         """
-        print env
         if 'QUERY_STRING' in env:
             args = dict(urlparse.parse_qsl(env['QUERY_STRING'], True))
         else:
             args = {}
 
         acl = 'acl' in args
-        print acl
         if acl:
-            res = acp_to_headers(env, 'HTTP_X_OBJECT_ACL_')
+            res = acp_to_headers(env, 'object')
             if res:
                 return res
-            print env
             env['QUERY_STRING'] = 'acl'
             env['REQUEST_METHOD'] = 'POST'
-            # tempauth use this for generate request token
-            env['REAL_REQUEST_METHOD'] = 'PUT'
         else:
             for key, value in env.items():
                 if key.startswith('HTTP_X_AMZ_META_'):
@@ -1093,13 +1109,10 @@ class Swift3Middleware(object):
         controller = controller(env, self.app, account, token, conf=self.conf,
                                 **path_parts)
 
-        try:
-            if hasattr(controller, req.method):
-                res = getattr(controller, req.method)(env, start_response)
-            else:
-                return get_err_response('InvalidURI')(env, start_response)
-        except Exception, e:
-            print e
+        if hasattr(controller, req.method):
+            res = getattr(controller, req.method)(env, start_response)
+        else:
+            return get_err_response('InvalidURI')(env, start_response)
 
         return res(env, start_response)
 
