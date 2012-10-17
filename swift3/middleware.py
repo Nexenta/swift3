@@ -65,13 +65,25 @@ from swift.common.utils import split_path
 from swift.common.utils import get_logger
 from swift.common.wsgi import WSGIContext
 from swift.common.swob import Request, Response
+from swift.common.middleware.acl import parse_acl
+from swift.obj import server as obj_server
+from swift.container import server as container_server
 from swift.common.http import HTTP_OK, HTTP_CREATED, HTTP_ACCEPTED, \
     HTTP_NO_CONTENT, HTTP_BAD_REQUEST, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, \
     HTTP_NOT_FOUND, HTTP_CONFLICT, HTTP_UNPROCESSABLE_ENTITY, is_success, \
     HTTP_NOT_IMPLEMENTED, HTTP_LENGTH_REQUIRED
+from swift.common.middleware.s3acl import ANONYMOUS_USERNAME,\
+    AUTHENTICATED_USERNAME
 
 
 MAX_BUCKET_LISTING = 1000
+AMZ_ALL_USERS = 'http://acs.amazonaws.com/groups/global/AllUsers'
+AMZ_AUTHENTICATED_USERS =\
+    'http://acs.amazonaws.com/groups/global/AuthenticatedUsers'
+REPLACE_USERNAMES = {
+    AMZ_ALL_USERS: ANONYMOUS_USERNAME,
+    AMZ_AUTHENTICATED_USERS: AUTHENTICATED_USERNAME
+}
 
 
 def get_err_response(code):
@@ -115,7 +127,11 @@ def get_err_response(code):
         (HTTP_LENGTH_REQUIRED, 'Length Required'),
         'IllegalVersioningConfigurationException':
             (HTTP_BAD_REQUEST, 'The specified versioning configuration '
-                               'invalid')}
+                               'invalid'),
+        'MalformedACLError':
+            (HTTP_BAD_REQUEST, 'The XML you provided was not well-formed or '
+                               'did not validate against our published schema')
+    }
 
     resp = Response(content_type='text/xml')
     resp.status = error_table[code][0]
@@ -243,6 +259,165 @@ def get_acl(account_name, headers):
                 '</AccessControlPolicy>' %
                 (account_name, account_name, account_name, account_name))
     return Response(body=body, content_type="text/plain")
+
+
+def amz_group_grant(uri, permission):
+    """
+    Returns XML Grant for group with URI.
+
+    :param uri: group URI
+    :param permission: permission value
+    """
+    grant = (
+        '<Grant>'
+            '<Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+                    'xsi:type="Group">'
+                '<URI>%s</URI>'
+            '</Grantee>'
+            '<Permission>%s</Permission>'
+        '</Grant>' % (uri, permission))
+    return grant
+
+
+def amz_user_grant(id, name, permission):
+    """
+    Returns XML Grant for user.
+
+    :param id: user id
+    :param name: user name
+    :param permission: permission value
+    """
+    grant = (
+        '<Grant>'
+            '<Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+                    'xsi:type="CanonicalUser">'
+                '<ID>%s</ID>'
+                '<DisplayName>%s</DisplayName>'
+            '</Grantee>'
+            '<Permission>%s</Permission>'
+        '</Grant>' % (id, name, permission))
+    return grant
+
+
+def get_s3_acl(headers, acl_headers, resource='container'):
+    out = ['<AccessControlPolicy>']
+    owner_header = 'x-%s-owner' % resource
+    if owner_header in headers:
+        owner = xml_escape(headers[owner_header])
+        out.append('<Owner><ID>%s</ID><DisplayName>%s</DisplayName></Owner>' %
+                   (owner, owner))
+    out.append('<AccessControlList>')
+    for header in acl_headers:
+        if header in headers:
+            permission = None
+            if resource == 'container':
+                # len(x-container-acl-) = 16; len(x-container-) = 12
+                frm = 16 if header.startswith('x-container-acl-') else 12
+                permission = header[frm:].upper().replace('-', '_')
+            elif resource == 'manifest':
+                # len(x-manifest-acl-) = 15
+                permission = header[15:].upper().replace('-', '_')
+            if permission:
+                referrers, groups = parse_acl(headers[header])
+                for ref in referrers:
+                    uri = AMZ_ALL_USERS if ref == '*' else ref
+                    grant = amz_group_grant(uri, permission)
+                    out.append(grant)
+                for group in groups:
+                    grant = amz_user_grant(group, group, permission)
+                    out.append(grant)
+    out.append('</AccessControlList></AccessControlPolicy>')
+    return Response(body=''.join(out), content_type='application/xml')
+
+
+def parse_access_control_policy(xml):
+    """
+    Parse given access control policy XML. Sample ACP XML
+
+    <AccessControlPolicy>
+      <Owner>
+        <ID>ID</ID>
+        <DisplayName>EmailAddress</DisplayName>
+      </Owner>
+      <AccessControlList>
+        <Grant>
+          <Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                xsi:type="CanonicalUser">
+            <ID>ID</ID>
+            <DisplayName>EmailAddress</DisplayName>
+          </Grantee>
+          <Permission>Permission</Permission>
+        </Grant>
+      </AccessControlList>
+    </AccessControlPolicy>
+
+    :param xml: XML string with ACP
+    :returns : dict with ACL 'owner':<owner>, 'acl': [{'user':<username>,
+               'permissions':[<permission>,...]},...]}
+    """
+    out = {'owner': '', 'acl': []}
+    dom = parseString(xml)
+    if len(dom.childNodes) and \
+            dom.childNodes[0].nodeName == 'AccessControlPolicy':
+        acp = dom.childNodes[0]
+        acl = None
+        for node in acp.childNodes:
+            if node.nodeName == 'Owner':
+                for n in node.childNodes:
+                    if n.nodeName == 'ID':
+                        out['owner'] = n.childNodes[0].nodeValue
+            elif node.nodeName == 'AccessControlList':
+                acl = node
+        if acl:
+            for grant in acl.childNodes:
+                user = {'user': '', 'permissions': []}
+                if grant.nodeName != 'Grant':
+                    continue
+                for node in grant.childNodes:
+                    if node.nodeName == 'Grantee':
+                        for n in node.childNodes:
+                            if n.nodeName == 'ID':
+                                user['user'] = n.childNodes[0].nodeValue
+                            elif n.nodeName == 'URI':
+                                user['user'] = n.childNodes[0].nodeValue
+                            elif n.nodeName == 'EmailAddress':
+                                user['user'] = n.childNodes[0].nodeValue
+                    elif node.nodeName == 'Permission':
+                        if node.childNodes[0].nodeValue:
+                            v = node.childNodes[0].nodeValue
+                            user['permissions'].append(v)
+                out['acl'].append(user)
+    return out
+
+
+def acp_to_headers(env, prefix):
+    """
+    Update env, add Swift ACL headers based on request body (wsgi.input).
+
+    :param env: WSGI enviroment dict
+    :param prefix: prefix for ACL headers
+                  (HTTP_X_CONTAINER_ACL_|HTTP_X_OBJECT_ACL_)
+    :returns : if any error occur return webob.Response object, else None
+    """
+    if 'wsgi.input' not in env:
+        return get_err_response('MalformedACLError')
+    try:
+        acp = parse_access_control_policy(env['wsgi.input'].read())
+    except:
+        return get_err_response('MalformedACLError')
+    permissions = {}
+    for user in acp.get('acl', []):
+        username = user.get('user')
+        if username:
+            for permission in user.get('permissions', []):
+                key = '%s%s' % (prefix, permission)
+                if key not in permissions:
+                    permissions[key] = []
+                if username in REPLACE_USERNAMES:
+                    username = REPLACE_USERNAMES[username]
+                permissions[key].append(username)
+    for key, value in permissions.items():
+        env[key] = ','.join(value)
 
 
 def canonical_string(req):
@@ -431,7 +606,7 @@ class BucketController(WSGIContext):
             # acl request sent with format=json etc confuses swift
             env['QUERY_STRING'] = 'format=json&limit=%s' % (max_keys + 1)
         if 'versions' in args:
-            env['QUERY_STRING'] += 'versions'
+            env['QUERY_STRING'] += '&versions'
         if 'marker' in args:
             env['QUERY_STRING'] += '&marker=%s' % quote(args['marker'])
         if 'prefix' in args:
@@ -443,7 +618,8 @@ class BucketController(WSGIContext):
         headers = dict(self._response_headers)
 
         if 'acl' in args:
-            return get_acl(self.account_name, headers)
+            return get_s3_acl(headers, container_server.ACL_HEADERS,
+                              'container')
 
         if status != HTTP_OK:
             if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
@@ -603,7 +779,6 @@ class BucketController(WSGIContext):
 
                 for header, acl in translated_acl:
                     env[header] = acl
-                env['REQUEST_METHOD'] = 'POST'
             if key == "CONTENT_LENGTH" and (value.isdigit() is False or
                                             value < 0):
                 return get_err_response("InvalidArgument")
@@ -703,6 +878,16 @@ class ObjectController(WSGIContext):
             env['REQUEST_METHOD'] = 'GET'
         else:
             head = False
+        if 'QUERY_STRING' in env:
+            args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
+        else:
+            args = {}
+
+        env['QUERY_STRING'] = ''
+        if 'acl' in args:
+            env['QUERY_STRING'] += 'acl'
+        if 'versionId' in args:
+            env['QUERY_STRING'] += 'versionId=%s' % args['versionId']
 
         app_iter = self._app_call(env)
 
@@ -718,7 +903,7 @@ class ObjectController(WSGIContext):
             else:
                 args = {}
             if 'acl' in args:
-                return get_acl(self.account_name, headers)
+                return get_s3_acl(headers, obj_server.ACL_HEADERS, 'object')
 
             new_hdrs = {}
             for key, val in headers.iteritems():
@@ -753,26 +938,46 @@ class ObjectController(WSGIContext):
         """
         Handle PUT Object and PUT Object (Copy) request
         """
-        for key, value in env.items():
-            if key.startswith('HTTP_X_AMZ_META_'):
-                del env[key]
-                env['HTTP_X_OBJECT_META_' + key[16:]] = value
-            elif key == 'HTTP_CONTENT_MD5':
-                if value == '':
-                    return get_err_response('InvalidDigest')
-                try:
-                    env['HTTP_ETAG'] = value.decode('base64').encode('hex')
-                except:
-                    return get_err_response('InvalidDigest')
-                if env['HTTP_ETAG'] == '':
-                    return get_err_response('SignatureDoesNotMatch')
-            elif key == 'HTTP_X_AMZ_COPY_SOURCE':
-                env['HTTP_X_COPY_FROM'] = value
+        print env
+        if 'QUERY_STRING' in env:
+            args = dict(urlparse.parse_qsl(env['QUERY_STRING'], True))
+        else:
+            args = {}
+
+        acl = 'acl' in args
+        print acl
+        if acl:
+            res = acp_to_headers(env, 'HTTP_X_OBJECT_ACL_')
+            if res:
+                return res
+            print env
+            env['QUERY_STRING'] = 'acl'
+            env['REQUEST_METHOD'] = 'POST'
+            # tempauth use this for generate request token
+            env['REAL_REQUEST_METHOD'] = 'PUT'
+        else:
+            for key, value in env.items():
+                if key.startswith('HTTP_X_AMZ_META_'):
+                    del env[key]
+                    env['HTTP_X_OBJECT_META_' + key[16:]] = value
+                elif key == 'HTTP_CONTENT_MD5':
+                    if value == '':
+                        return get_err_response('InvalidDigest')
+                    try:
+                        env['HTTP_ETAG'] = value.decode('base64').encode('hex')
+                    except:
+                        return get_err_response('InvalidDigest')
+                    if env['HTTP_ETAG'] == '':
+                        return get_err_response('SignatureDoesNotMatch')
+                elif key == 'HTTP_X_AMZ_COPY_SOURCE':
+                    env['HTTP_X_COPY_FROM'] = value
 
         body_iter = self._app_call(env)
         status = self._get_status_int()
 
-        if status != HTTP_CREATED:
+        success_status = HTTP_ACCEPTED if acl else HTTP_CREATED
+
+        if status != success_status:
             if status in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
                 return get_err_response('AccessDenied')
             elif status == HTTP_NOT_FOUND:
@@ -782,13 +987,17 @@ class ObjectController(WSGIContext):
             else:
                 return get_err_response('InvalidURI')
 
-        if 'HTTP_X_COPY_FROM' in env:
+        if not acl and 'HTTP_X_COPY_FROM' in env:
             body = '<CopyObjectResult>' \
                    '<ETag>"%s"</ETag>' \
                    '</CopyObjectResult>' % self._response_header_value('etag')
             return Response(status=HTTP_OK, body=body)
 
-        return Response(status=200, etag=self._response_header_value('etag'))
+        kwargs = {'status': HTTP_OK}
+        if not acl:
+            kwargs['etag'] = self._response_header_value('etag')
+
+        return Response(**kwargs)
 
     def DELETE(self, env, start_response):
         """
@@ -884,10 +1093,13 @@ class Swift3Middleware(object):
         controller = controller(env, self.app, account, token, conf=self.conf,
                                 **path_parts)
 
-        if hasattr(controller, req.method):
-            res = getattr(controller, req.method)(env, start_response)
-        else:
-            return get_err_response('InvalidURI')(env, start_response)
+        try:
+            if hasattr(controller, req.method):
+                res = getattr(controller, req.method)(env, start_response)
+            else:
+                return get_err_response('InvalidURI')(env, start_response)
+        except Exception, e:
+            print e
 
         return res(env, start_response)
 
