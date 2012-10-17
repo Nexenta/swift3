@@ -676,7 +676,7 @@ class BucketController(WSGIContext):
                                 '</Owner>'
                             '</Version>' % (
                                 unquote(obj['name']), obj['version_id'],
-                                'true' if obj['latest'] else 'false',
+                                'true' if obj['is_latest'] else 'false',
                                 obj['last_modified'], obj['hash'],
                                 obj['bytes'], obj['owner'], obj['owner']
                             ))
