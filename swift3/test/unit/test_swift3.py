@@ -66,9 +66,10 @@ class FakeAppService(FakeApp):
 
 
 class FakeAppBucket(FakeApp):
-    def __init__(self, status=200):
+    def __init__(self, status=200, headers=[]):
         FakeApp.__init__(self)
         self.status = status
+        self.headers = headers
         self.objects = (('rose', '2011-01-05T02:19:14.275290', 0, 303),
                         ('viola', '2011-01-05T02:19:14.275290', 0, 3909),
                         ('lily', '2011-01-05T02:19:14.275290', 0, 3909))
@@ -115,6 +116,9 @@ class FakeAppBucket(FakeApp):
                 start_response(HTTPConflict().status, [])
             else:
                 start_response(HTTPBadRequest().status, [])
+        elif env['REQUEST_METHOD'] == 'HEAD':
+            if self.status == 200:
+                start_response(Response(status=200).status, self.headers)
         return []
 
 
