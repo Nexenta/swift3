@@ -710,7 +710,7 @@ class BucketController(WSGIContext):
                                 '<LastModified>%s</LastModified>'
                             '</DeleteMarker>' % (
                                 obj['name'], obj['version_id'],
-                                'true' if obj['latest'] else 'false',
+                                'true' if obj['is_latest'] else 'false',
                                 obj['last_modified']
                             ))
             body = ('<?xml version="1.0" encoding="UTF-8"?>'
