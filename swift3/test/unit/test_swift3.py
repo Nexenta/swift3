@@ -21,9 +21,14 @@ import hashlib
 import xml.dom.minidom
 import simplejson
 
-from swift.common.swob import Request, Response, HTTPUnauthorized, \
-    HTTPCreated,HTTPNoContent, HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
-    HTTPConflict
+try:
+    from swift.common.swob import Request, Response, HTTPUnauthorized, \
+        HTTPCreated, HTTPNoContent, HTTPAccepted, HTTPBadRequest,\
+        HTTPNotFound, HTTPConflict
+except ImportError:
+    from webob import Request, Response
+    from webob.exc import HTTPUnauthorized, HTTPCreated, HTTPNoContent,\
+        HTTPAccepted, HTTPBadRequest, HTTPNotFound, HTTPConflict
 
 from swift3 import middleware as swift3
 
@@ -205,11 +210,11 @@ class TestSwift3(unittest.TestCase):
         code = dom.getElementsByTagName('Code')[0].childNodes[0].nodeValue
         self.assertEquals(code, 'InvalidURI')
 
-    def _test_method_error(self, cl, method, path, status):
+    def _test_method_error(self, cl, method, path, status, headers={}):
         local_app = swift3.filter_factory({})(cl(status))
-        req = Request.blank(path,
-                            environ={'REQUEST_METHOD': method},
-                            headers={'Authorization': 'AWS test:tester:hmac'})
+        headers.update({'Authorization': 'AWS test:tester:hmac'})
+        req = Request.blank(path, environ={'REQUEST_METHOD': method},
+                            headers=headers)
         resp = local_app(req.environ, start_response)
         dom = xml.dom.minidom.parseString("".join(resp))
         self.assertEquals(dom.firstChild.nodeName, 'Error')
@@ -362,6 +367,12 @@ class TestSwift3(unittest.TestCase):
         self.assertEquals(args['prefix'], 'c')
 
     def test_bucket_PUT_error(self):
+        code = self._test_method_error(FakeAppBucket, 'PUT', '/bucket', 201,
+                                       headers={'Content-Length': 'a'})
+        self.assertEqual(code, 'InvalidArgument')
+        code = self._test_method_error(FakeAppBucket, 'PUT', '/bucket', 201,
+                                       headers={'Content-Length': '-1'})
+        self.assertEqual(code, 'InvalidArgument')
         code = self._test_method_error(FakeAppBucket, 'PUT', '/bucket', 401)
         self.assertEquals(code, 'AccessDenied')
         code = self._test_method_error(FakeAppBucket, 'PUT', '/bucket', 202)
@@ -398,7 +409,8 @@ class TestSwift3(unittest.TestCase):
     def _check_acl(self, owner, resp):
         dom = xml.dom.minidom.parseString("".join(resp))
         self.assertEquals(dom.firstChild.nodeName, 'AccessControlPolicy')
-        name = dom.getElementsByTagName('Permission')[0].childNodes[0].nodeValue
+        name = \
+            dom.getElementsByTagName('Permission')[0].childNodes[0].nodeValue
         self.assertEquals(name, 'FULL_CONTROL')
         name = dom.getElementsByTagName('ID')[0].childNodes[0].nodeValue
         self.assertEquals(name, owner)
@@ -480,10 +492,10 @@ class TestSwift3(unittest.TestCase):
     def test_object_PUT(self):
         local_app = swift3.filter_factory({})(FakeAppObject(201))
         req = Request.blank('/bucket/object',
-                            environ={'REQUEST_METHOD': 'PUT'},
-                            headers={'Authorization': 'AWS test:tester:hmac',
-                                     'x-amz-storage-class': 'REDUCED_REDUNDANCY',
-                                     'Content-MD5': 'Gyz1NfJ3Mcl0NDZFo5hTKA=='})
+                        environ={'REQUEST_METHOD': 'PUT'},
+                        headers={'Authorization': 'AWS test:tester:hmac',
+                                 'x-amz-storage-class': 'REDUCED_REDUNDANCY',
+                                 'Content-MD5': 'Gyz1NfJ3Mcl0NDZFo5hTKA=='})
         req.date = datetime.now()
         req.content_type = 'text/plain'
         resp = local_app(req.environ, local_app.app.do_start_response)
@@ -588,10 +600,10 @@ class TestSwift3(unittest.TestCase):
                 {'Content-Type': None,
                  'Date': 'Tue, 12 Jul 2011 10:52:57 +0000'})
 
-        req1 = Request.blank('/', headers=
-                {'Content-Type': None, 'X-Amz-Something': 'test'})
-        req2 = Request.blank('/', headers=
-                {'Content-Type': '', 'X-Amz-Something': 'test'})
+        req1 = Request.blank('/',
+                headers={'Content-Type': None, 'X-Amz-Something': 'test'})
+        req2 = Request.blank('/',
+                headers={'Content-Type': '', 'X-Amz-Something': 'test'})
         req3 = Request.blank('/', headers={'X-Amz-Something': 'test'})
 
         self.assertEquals(swift3.canonical_string(req1),

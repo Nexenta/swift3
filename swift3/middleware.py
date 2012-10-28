@@ -64,7 +64,6 @@ import re
 from swift.common.utils import split_path
 from swift.common.utils import get_logger
 from swift.common.wsgi import WSGIContext
-from swift.common.swob import Request, Response
 from swift.common.middleware.acl import parse_acl
 from swift.obj import server as obj_server
 from swift.container import server as container_server
@@ -73,6 +72,11 @@ from swift.common.http import HTTP_OK, HTTP_CREATED, HTTP_ACCEPTED, \
     HTTP_NOT_FOUND, HTTP_CONFLICT, HTTP_UNPROCESSABLE_ENTITY, is_success, \
     HTTP_NOT_IMPLEMENTED, HTTP_LENGTH_REQUIRED
 from swift.common.middleware.s3acl import AUTHENTICATED_USERNAME
+
+try:
+    from swift.common.swob import Request, Response
+except ImportError:
+    from webob import Request, Response
 
 
 MAX_BUCKET_LISTING = 1000
@@ -459,16 +463,24 @@ def canonical_string(req):
     for k in sorted(key.lower() for key in amz_headers):
         buf += "%s:%s\n" % (k, amz_headers[k])
 
-    path = req.path
-    if req.query_string:
-        path += '?' + req.query_string
+    path = req.path_qs
+    args = ''
     if '?' in path:
         path, args = path.split('?', 1)
-        for key, value in urlparse.parse_qsl(args, keep_blank_values=True):
-            if key in ('acl', 'logging', 'torrent', 'location', 'versions',
-                       'requestPayment', 'versioning', 'versionId'):
-                param = '%s=%s' % (key, value) if value else key
-                return "%s%s?%s" % (buf, path, param)
+    segs = path.split('/')
+    if len(segs) > 2 and segs[2]:  # segs[2] is object name
+        # We doing this for replace '/' with %2F, because by default quote
+        # don't replace '/' with %2F
+        object_name = quote(unquote('/'.join(segs[2:])), safe='')
+        path = '/'.join(segs[:2] + [object_name])
+    params = []
+    for key, value in urlparse.parse_qsl(args, keep_blank_values=True):
+        # list of keys must be lexicographically sorted
+        if key in ('acl', 'location', 'logging', 'requestPayment',
+                   'torrent', 'versionId', 'versioning', 'versions'):
+            params.append('%s=%s' % (key, value) if value else key)
+    if params:
+        return "%s%s?%s" % (buf, path, '&'.join(params))
     return buf + path
 
 
@@ -527,7 +539,8 @@ def validate_bucket_name(name):
     True if valid, False otherwise
     """
 
-    if '_' in name or len(name) < 3 or len(name) > 63 or not name[-1].isalnum():
+    if '_' in name or len(name) < 3 or len(name) > 63 or \
+       not name[-1].isalnum():
         # Bucket names should not contain underscores (_)
         # Bucket names must end with a lowercase letter or number
         # Bucket names should be between 3 and 63 characters long
@@ -681,7 +694,21 @@ class BucketController(WSGIContext):
             obj_list = []
             for obj in objects:
                 if 'subdir' not in obj:
-                    if not obj['deleted']:
+                    if obj['deleted']:
+                        name = xml_escape(unquote(obj['name'].encode('utf-8')))
+                        obj_list.append(
+                            '<DeleteMarker>'
+                                '<Key>%s</Key>'
+                                '<VersionId>%s</VersionId>'
+                                '<IsLatest>%s</IsLatest>'
+                                '<LastModified>%s</LastModified>'
+                            '</DeleteMarker>' % (
+                                name, obj['version_id'],
+                                'true' if obj['is_latest'] else 'false',
+                                obj['last_modified']
+                        ))
+                    else:
+                        name = xml_escape(unquote(obj['name'].encode('utf-8')))
                         obj_list.append(
                             '<Version>'
                                 '<Key>%s</Key>'
@@ -696,23 +723,11 @@ class BucketController(WSGIContext):
                                     '<DisplayName>%s</DisplayName>'
                                 '</Owner>'
                             '</Version>' % (
-                                unquote(obj['name']), obj['version_id'],
+                                name, obj['version_id'],
                                 'true' if obj['is_latest'] else 'false',
                                 obj['last_modified'], obj['hash'],
                                 obj['bytes'], obj['owner'], obj['owner']
-                            ))
-                    else:
-                        obj_list.append(
-                            '<DeleteMarker>'
-                                '<Key>%s</Key>'
-                                '<VersionId>%s</VersionId>'
-                                '<IsLatest>%s</IsLatest>'
-                                '<LastModified>%s</LastModified>'
-                            '</DeleteMarker>' % (
-                                obj['name'], obj['version_id'],
-                                'true' if obj['is_latest'] else 'false',
-                                obj['last_modified']
-                            ))
+                        ))
             body = ('<?xml version="1.0" encoding="UTF-8"?>'
                 '<ListVersionsResult '
                         'xmlns="http://s3.amazonaws.com/doc/2006-03-01">'
@@ -738,6 +753,31 @@ class BucketController(WSGIContext):
                          % xml_escape(i['subdir'])
                          for i in objects[:max_keys] if 'subdir' in i])))
         else:
+            obj_list = []
+            prefixes = []
+            for i in objects:
+                if 'subdir' in i:
+                    name = xml_escape(unquote(i['subdir'].encode('utf-8')))
+                    prefixes.append('<CommonPrefixes>'
+                                    '<Prefix>%s</Prefix>'
+                                    '</CommonPrefixes>' % name)
+                else:
+                    name = xml_escape(unquote(i['name'].encode('utf-8')))
+                    owner = i.get('owner', self.account_name)
+                    obj_list.append(
+                        '<Contents>'
+                            '<Key>%s</Key>'
+                            '<LastModified>%sZ</LastModified>'
+                            '<ETag>%s</ETag>'
+                            '<Size>%s</Size>'
+                            '<StorageClass>STANDARD</StorageClass>'
+                            '<Owner>'
+                                '<ID>%s</ID>'
+                                '<DisplayName>%s</DisplayName>'
+                            '</Owner>'
+                        '</Contents>' %
+                        (name, i['last_modified'], i['hash'], i['bytes'],
+                         owner, owner))
             body = ('<?xml version="1.0" encoding="UTF-8"?>'
                 '<ListBucketResult '
                     'xmlns="http://s3.amazonaws.com/doc/2006-03-01">'
@@ -757,25 +797,8 @@ class BucketController(WSGIContext):
                           len(objects) == (max_keys + 1) else 'false',
                 max_keys,
                 xml_escape(self.container_name),
-                "".join(['<Contents>'
-                             '<Key>%s</Key>'
-                             '<LastModified>%sZ</LastModified>'
-                             '<ETag>%s</ETag>'
-                             '<Size>%s</Size>'
-                             '<StorageClass>STANDARD</StorageClass>'
-                             '<Owner>'
-                                 '<ID>%s</ID>'
-                                 '<DisplayName>%s</DisplayName>'
-                             '</Owner>'
-                         '</Contents>' %
-                        (xml_escape(unquote(i['name'])), i['last_modified'],
-                         i['hash'], i['bytes'],
-                         i.get('owner', self.account_name),
-                         i.get('owner', self.account_name))
-                         for i in objects[:max_keys] if 'subdir' not in i]),
-                "".join(['<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>'
-                         % xml_escape(i['subdir'])
-                         for i in objects[:max_keys] if 'subdir' in i])))
+                ''.join(obj_list),
+                ''.join(prefixes)))
         return Response(body=body, content_type='application/xml')
 
     def PUT(self, env, start_response):
@@ -1054,6 +1077,12 @@ class Swift3Middleware(object):
         return ServiceController, d
 
     def __call__(self, env, start_response):
+        try:
+            return self.handle_request(env, start_response)
+        except Exception, e:
+            self.logger.exception(e)
+
+    def handle_request(self, env, start_response):
         req = Request(env)
         self.logger.debug('Calling Swift3 Middleware')
         self.logger.debug(req.__dict__)
@@ -1083,7 +1112,7 @@ class Swift3Middleware(object):
             return get_err_response('InvalidArgument')(env, start_response)
 
         try:
-            controller, path_parts = self.get_controller(req.path)
+            controller, path_parts = self.get_controller(env['PATH_INFO'])
         except ValueError:
             return get_err_response('InvalidURI')(env, start_response)
 
