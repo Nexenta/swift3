@@ -476,8 +476,10 @@ def canonical_string(req):
     params = []
     for key, value in urlparse.parse_qsl(args, keep_blank_values=True):
         # list of keys must be lexicographically sorted
-        if key in ('acl', 'location', 'logging', 'requestPayment',
-                   'torrent', 'versionId', 'versioning', 'versions'):
+        if key in ('acl', 'lifecycle', 'location', 'logging', 'notification',
+                   'partNumber', 'policy', 'requestPayment', 'torrent',
+                   'uploadId', 'uploads', 'versionId', 'versioning',
+                   'versions', 'website'):
             params.append('%s=%s' % (key, value) if value else key)
     if params:
         return "%s%s?%s" % (buf, path, '&'.join(params))
