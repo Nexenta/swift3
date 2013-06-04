@@ -23,6 +23,7 @@ The following opperations are currently supported:
     * GET Bucket (List Objects)
     * PUT Bucket
     * DELETE Object
+    * Delete Multiple Objects
     * GET Object
     * HEAD Object
     * PUT Object
@@ -168,7 +169,7 @@ class BucketController(WSGIContext):
         status = self._get_status_int()
         headers = dict(self._response_headers)
 
-        if 'acl' in args:
+        if is_success(status) and 'acl' in args:
             return get_s3_acl(headers, container_server.ACL_HEADERS,
                               'container')
 
@@ -357,19 +358,46 @@ class BucketController(WSGIContext):
             env['REQUEST_METHOD'] = 'POST'
 
         if not acl and not versioning:
-            # Translate the Amazon ACL to something that can be
-            # implemented in Swift, 501 otherwise. Swift uses POST
-            # for ACLs, whereas S3 uses PUT.
             if 'HTTP_X_AMZ_ACL' in env:
                 amz_acl = env['HTTP_X_AMZ_ACL']
+                # Translate the Amazon ACL to something that can be
+                # implemented in Swift, 501 otherwise. Swift uses POST
+                # for ACLs, whereas S3 uses PUT.
                 del env['HTTP_X_AMZ_ACL']
+                if 'QUERY_STRING' in env:
+                    del env['QUERY_STRING']
+
                 translated_acl = swift_acl_translate(amz_acl)
                 if translated_acl == 'Unsupported':
                     return get_err_response('Unsupported')
                 elif translated_acl == 'InvalidArgument':
                     return get_err_response('InvalidArgument')
+
                 for header, acl in translated_acl:
                     env[header] = acl
+
+            if 'CONTENT_LENGTH' in env:
+                content_length = env['CONTENT_LENGTH']
+                try:
+                    content_length = int(content_length)
+                except (ValueError, TypeError):
+                    return get_err_response('InvalidArgument')
+                if content_length < 0:
+                    return get_err_response('InvalidArgument')
+
+            if 'QUERY_STRING' in env:
+                args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
+                if 'acl' in args:
+                    # We very likely have an XML-based ACL request.
+                    body = env['wsgi.input'].readline().decode()
+                    translated_acl = swift_acl_translate(body, xml=True)
+                    if translated_acl == 'Unsupported':
+                        return get_err_response('Unsupported')
+                    elif translated_acl == 'InvalidArgument':
+                        return get_err_response('InvalidArgument')
+                    for header, acl in translated_acl:
+                        env[header] = acl
+                    env['REQUEST_METHOD'] = 'POST'
 
         body_iter = self._app_call(env)
         status = self._get_status_int()
@@ -484,7 +512,6 @@ class BucketController(WSGIContext):
             return self.app(env, start_response)
 
         return get_err_response('Unsupported')
-
 
 class ObjectController(WSGIContext):
     """
@@ -625,8 +652,6 @@ class ObjectController(WSGIContext):
         if not acl:
             kwargs['etag'] = self._response_header_value('etag')
 
-        return Response(**kwargs)
-
     def POST(self, env, start_response):
         return get_err_response('AccessDenied')
 
@@ -682,6 +707,7 @@ class Swift3Middleware(object):
             return self.handle_request(env, start_response)
         except Exception, e:
             self.logger.exception(e)
+        return get_err_response('ServiceUnavailable')(env, start_response)
 
     def handle_request(self, env, start_response):
         req = Request(env)
