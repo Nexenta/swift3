@@ -54,6 +54,7 @@ following for an SAIO setup::
 from urllib import unquote, quote
 import base64
 from xml.sax.saxutils import escape as xml_escape
+from xml.dom.minidom import parseString
 import urlparse
 
 from simplejson import loads
@@ -193,7 +194,7 @@ class BucketController(WSGIContext):
             vers = self._response_header_value('x-container-versioning') or ''
             body = (
                 '<VersioningConfiguration '
-                        'xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+                'xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
                 '<Status>%s</Status></VersioningConfiguration>' %
                 vers.capitalize())
             return Response(body=body, content_type='application/xml')
@@ -214,39 +215,37 @@ class BucketController(WSGIContext):
                         name = xml_escape(unquote(obj['name'].encode('utf-8')))
                         obj_list.append(
                             '<DeleteMarker>'
-                                '<Key>%s</Key>'
-                                '<VersionId>%s</VersionId>'
-                                '<IsLatest>%s</IsLatest>'
-                                '<LastModified>%s</LastModified>'
+                            '<Key>%s</Key>'
+                            '<VersionId>%s</VersionId>'
+                            '<IsLatest>%s</IsLatest>'
+                            '<LastModified>%s</LastModified>'
                             '</DeleteMarker>' % (
                                 name, obj['version_id'],
                                 'true' if obj['is_latest'] else 'false',
-                                obj['last_modified']
-                        ))
+                                obj['last_modified']))
                     else:
                         name = xml_escape(unquote(obj['name'].encode('utf-8')))
                         obj_list.append(
                             '<Version>'
-                                '<Key>%s</Key>'
-                                '<VersionId>%s</VersionId>'
-                                '<IsLatest>%s</IsLatest>'
-                                '<LastModified>%s</LastModified>'
-                                '<ETag>&quot;%s&quot;</ETag>'
-                                '<Size>%s</Size>'
-                                '<StorageClass>STANDARD</StorageClass>'
-                                '<Owner>'
-                                    '<ID>%s</ID>'
-                                    '<DisplayName>%s</DisplayName>'
-                                '</Owner>'
+                            '<Key>%s</Key>'
+                            '<VersionId>%s</VersionId>'
+                            '<IsLatest>%s</IsLatest>'
+                            '<LastModified>%s</LastModified>'
+                            '<ETag>&quot;%s&quot;</ETag>'
+                            '<Size>%s</Size>'
+                            '<StorageClass>STANDARD</StorageClass>'
+                            '<Owner>'
+                            '<ID>%s</ID>'
+                            '<DisplayName>%s</DisplayName>'
+                            '</Owner>'
                             '</Version>' % (
                                 name, obj['version_id'],
                                 'true' if obj['is_latest'] else 'false',
                                 obj['last_modified'], obj['hash'],
-                                obj['bytes'], obj['owner'], obj['owner']
-                        ))
+                                obj['bytes'], obj['owner'], obj['owner']))
             body = ('<?xml version="1.0" encoding="UTF-8"?>'
-                '<ListVersionsResult '
-                        'xmlns="http://s3.amazonaws.com/doc/2006-03-01">'
+                    '<ListVersionsResult '
+                    'xmlns="http://s3.amazonaws.com/doc/2006-03-01">'
                     '<Prefix>%s</Prefix>'
                     '<KeyMarker>%s</KeyMarker>'
                     '<VersionIdMarker>%s</VersionIdMarker>'
@@ -256,18 +255,19 @@ class BucketController(WSGIContext):
                     '<Name>%s</Name>'
                     '%s'
                     '%s'
-                '</ListVersionsResult>' % (
-                xml_escape(args.get('prefix', '')),
-                xml_escape(args.get('key-marker', '')),
-                xml_escape(args.get('version-id-marker', '')),
-                xml_escape(args.get('delimiter', '')),
-                'true' if len(objects) == (max_keys + 1) else 'false',
-                max_keys,
-                xml_escape(self.container_name),
-                "".join(obj_list),
-                "".join(['<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>'
-                         % xml_escape(i['subdir'])
-                         for i in objects[:max_keys] if 'subdir' in i])))
+                    '</ListVersionsResult>' % (
+                    xml_escape(args.get('prefix', '')),
+                    xml_escape(args.get('key-marker', '')),
+                    xml_escape(args.get('version-id-marker', '')),
+                    xml_escape(args.get('delimiter', '')),
+                    'true' if len(objects) == (max_keys + 1) else 'false',
+                    max_keys,
+                    xml_escape(self.container_name),
+                    "".join(obj_list),
+                    "".join([
+                        '<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>'
+                        % xml_escape(i['subdir'])
+                        for i in objects[:max_keys] if 'subdir' in i])))
         else:
             obj_list = []
             prefixes = []
@@ -282,20 +282,20 @@ class BucketController(WSGIContext):
                     owner = i.get('owner', self.account_name)
                     obj_list.append(
                         '<Contents>'
-                            '<Key>%s</Key>'
-                            '<LastModified>%sZ</LastModified>'
-                            '<ETag>%s</ETag>'
-                            '<Size>%s</Size>'
-                            '<StorageClass>STANDARD</StorageClass>'
-                            '<Owner>'
-                                '<ID>%s</ID>'
-                                '<DisplayName>%s</DisplayName>'
-                            '</Owner>'
+                        '<Key>%s</Key>'
+                        '<LastModified>%sZ</LastModified>'
+                        '<ETag>%s</ETag>'
+                        '<Size>%s</Size>'
+                        '<StorageClass>STANDARD</StorageClass>'
+                        '<Owner>'
+                        '<ID>%s</ID>'
+                        '<DisplayName>%s</DisplayName>'
+                        '</Owner>'
                         '</Contents>' %
                         (name, i['last_modified'], i['hash'], i['bytes'],
                          owner, owner))
             body = ('<?xml version="1.0" encoding="UTF-8"?>'
-                '<ListBucketResult '
+                    '<ListBucketResult '
                     'xmlns="http://s3.amazonaws.com/doc/2006-03-01">'
                     '<Prefix>%s</Prefix>'
                     '<Marker>%s</Marker>'
@@ -305,16 +305,16 @@ class BucketController(WSGIContext):
                     '<Name>%s</Name>'
                     '%s'
                     '%s'
-                '</ListBucketResult>' % (
-                xml_escape(args.get('prefix', '')),
-                xml_escape(args.get('marker', '')),
-                xml_escape(args.get('delimiter', '')),
-                'true' if max_keys > 0 and
-                          len(objects) == (max_keys + 1) else 'false',
-                max_keys,
-                xml_escape(self.container_name),
-                ''.join(obj_list),
-                ''.join(prefixes)))
+                    '</ListBucketResult>' % (
+                    xml_escape(args.get('prefix', '')),
+                    xml_escape(args.get('marker', '')),
+                    xml_escape(args.get('delimiter', '')),
+                    'true' if (max_keys > 0 and
+                               len(objects) == (max_keys + 1)) else 'false',
+                    max_keys,
+                    xml_escape(self.container_name),
+                    ''.join(obj_list),
+                    ''.join(prefixes)))
         return Response(body=body, content_type='application/xml')
 
     def PUT(self, env, start_response):
@@ -409,10 +409,79 @@ class BucketController(WSGIContext):
         resp.status = HTTP_NO_CONTENT
         return resp
 
+    def _delete_multiple_objects(self, env):
+        def _object_key_iter(xml):
+            dom = parseString(xml)
+            delete = dom.getElementsByTagName('Delete')[0]
+            for obj in delete.getElementsByTagName('Object'):
+                key = obj.getElementsByTagName('Key')[0].firstChild.data
+                version = None
+                if obj.getElementsByTagName('VersionId').length > 0:
+                    version = obj.getElementsByTagName('VersionId')[0]\
+                        .firstChild.data
+                yield (key, version)
+
+        def _get_deleted_elem(key):
+            return '  <Deleted>\r\n' \
+                   '    <Key>%s</Key>\r\n' \
+                   '  </Deleted>\r\n' % key
+
+        def _get_err_elem(key, err_code, message):
+            return '  <Error>\r\n' \
+                   '    <Key>%s</Key>\r\n' \
+                   '    <Code>%s</Code>\r\n' \
+                   '    <Message>%s</Message>\r\n' \
+                   '  </Error>\r\n' % (key, err_code, message)
+
+        body = '<?xml version="1.0" encoding="UTF-8"?>\r\n' \
+               '<DeleteResult ' \
+               'xmlns="http://doc.s3.amazonaws.com/2006-03-01">\r\n'
+        xml = env['wsgi.input'].read()
+        for key, version in _object_key_iter(xml):
+            if version is not None:
+                # TODO: delete the specific version of the object
+                return get_err_response('Unsupported')
+
+            tmp_env = dict(env)
+            del tmp_env['QUERY_STRING']
+            tmp_env['CONTENT_LENGTH'] = '0'
+            tmp_env['REQUEST_METHOD'] = 'DELETE'
+            controller = ObjectController(tmp_env, self.app, self.account_name,
+                                          env['HTTP_X_AUTH_TOKEN'],
+                                          self.container_name, key)
+            body_iter = controller._app_call(tmp_env)
+            status = controller._get_status_int()
+
+            if status == HTTP_NO_CONTENT or status == HTTP_NOT_FOUND:
+                body += _get_deleted_elem(key)
+            else:
+                if status == HTTP_UNAUTHORIZED:
+                    body += _get_err_elem(key, 'AccessDenied', 'Access Denied')
+                else:
+                    body += _get_err_elem(key, 'InvalidURI', 'Invalid URI')
+
+        body += '</DeleteResult>\r\n'
+        return Response(status=HTTP_OK, body=body)
+
     def POST(self, env, start_response):
         """
-        Handle POST Bucket request
+        Handle POST Bucket (Delete/Upload Multiple Objects) request
         """
+        if 'QUERY_STRING' in env:
+            args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
+        else:
+            args = {}
+
+        if 'delete' in args:
+            return self._delete_multiple_objects(env)
+
+        if 'uploads' in args:
+            # Pass it through, the s3multi upload helper will handle it.
+            return self.app(env, start_response)
+
+        if 'uploadId' in args:
+            # Pass it through, the s3multi upload helper will handle it.
+            return self.app(env, start_response)
 
         return get_err_response('Unsupported')
 
@@ -440,6 +509,10 @@ class ObjectController(WSGIContext):
             args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
         else:
             args = {}
+
+        # Let s3multi handle it.
+        if 'uploadId' in args:
+            return self.app(env, start_response)
 
         env['QUERY_STRING'] = ''
         if 'acl' in args:
@@ -554,6 +627,9 @@ class ObjectController(WSGIContext):
 
         return Response(**kwargs)
 
+    def POST(self, env, start_response):
+        return get_err_response('AccessDenied')
+
     def DELETE(self, env, start_response):
         """
         Handle DELETE Object request
@@ -582,14 +658,23 @@ class Swift3Middleware(object):
         self.logger = get_logger(self.conf, log_route='swift3')
         self.location = conf.get('location', 'US').upper()
 
-    def get_controller(self, path):
+    def get_controller(self, env, path):
         container, obj = split_path(path, 0, 2, True)
         d = dict(container_name=container, object_name=obj)
 
+        if 'QUERY_STRING' in env:
+            args = dict(urlparse.parse_qsl(env['QUERY_STRING'], 1))
+        else:
+            args = {}
+
         if container and obj:
+            if env['REQUEST_METHOD'] == 'POST':
+                if 'uploads' or 'uploadId' in args:
+                    return BucketController, d
             return ObjectController, d
         elif container:
             return BucketController, d
+
         return ServiceController, d
 
     def __call__(self, env, start_response):
@@ -628,12 +713,16 @@ class Swift3Middleware(object):
             return get_err_response('InvalidArgument')(env, start_response)
 
         try:
-            controller, path_parts = self.get_controller(env['PATH_INFO'])
+            controller, path_parts = self.get_controller(env, env['PATH_INFO'])
         except ValueError:
             return get_err_response('InvalidURI')(env, start_response)
 
         if 'Date' in req.headers:
             date = email.utils.parsedate(req.headers['Date'])
+            if date is None and 'Expires' in req.params:
+                d = email.utils.formatdate(float(req.params['Expires']))
+                date = email.utils.parsedate(d)
+
             if date is None:
                 return get_err_response('AccessDenied')(env, start_response)
 
@@ -644,7 +733,7 @@ class Swift3Middleware(object):
             if d1 < epoch:
                 return get_err_response('AccessDenied')(env, start_response)
 
-            delta = datetime.timedelta(seconds=60 * 10)
+            delta = datetime.timedelta(seconds=60 * 5)
             if d1 - d2 > delta or d2 - d1 > delta:
                 return get_err_response('RequestTimeTooSkewed')(env,
                                                                 start_response)
