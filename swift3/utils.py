@@ -260,6 +260,7 @@ def amz_user_grant(user_id, name, permission):
 def get_s3_acl(headers, acl_headers, resource='container'):
     out = ['<AccessControlPolicy>']
     owner_header = 'x-%s-owner' % resource
+    headers = dict([(k.lower(), v) for k, v in headers.iteritems()])
     if owner_header in headers:
         owner = xml_escape(headers[owner_header])
         out.append('<Owner><ID>%s</ID><DisplayName>%s</DisplayName></Owner>' %
@@ -285,7 +286,9 @@ def get_s3_acl(headers, acl_headers, resource='container'):
                     grant = amz_user_grant(group, group, permission)
                     out.append(grant)
     out.append('</AccessControlList></AccessControlPolicy>')
-    return Response(body=''.join(out), content_type='application/xml')
+    body = ''.join(out)
+    return Response(body=body, content_type='application/xml',
+                    headers={'Content-Length': str(len(body))})
 
 
 def parse_access_control_policy(xml):
@@ -424,13 +427,6 @@ def canonical_string(req):
     path = req.environ.get('RAW_PATH_INFO', req.path)
     if req.query_string:
         path += '?' + req.query_string
-
-    segs = path.split('/')
-    if len(segs) > 2 and segs[2]:  # segs[2] is object name
-        # We doing this for replace '/' with %2F, because by default quote
-        # don't replace '/' with %2F
-        object_name = quote(unquote('/'.join(segs[2:])), safe='')
-        path = '/'.join(segs[:2] + [object_name])
 
     if '?' in path:
         path, args = path.split('?', 1)

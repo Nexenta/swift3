@@ -151,11 +151,11 @@ class BucketController(WSGIContext):
         max_keys = min(int(args.get('max-keys', MAX_BUCKET_LISTING)),
                        MAX_BUCKET_LISTING)
 
-        if 'acl' not in args:
+        if 'acl' in args:
+            env['REQUEST_METHOD'] = 'HEAD'
+        else:
             # acl request sent with format=json etc confuses swift
             env['QUERY_STRING'] = 'format=json&limit=%s' % (max_keys + 1)
-        else:
-            env['REQUEST_METHOD'] = 'HEAD'
         if 'versions' in args:
             env['QUERY_STRING'] += '&versions'
         if 'marker' in args:
@@ -168,6 +168,9 @@ class BucketController(WSGIContext):
         body_iter = self._app_call(env)
         status = self._get_status_int()
         headers = dict(self._response_headers)
+
+        if 'acl' in args:
+            env['REQUEST_METHOD'] = 'GET'  # recover HTTP method
 
         if is_success(status) and 'acl' in args:
             return get_s3_acl(headers, container_server.ACL_HEADERS,
@@ -513,6 +516,7 @@ class BucketController(WSGIContext):
 
         return get_err_response('Unsupported')
 
+
 class ObjectController(WSGIContext):
     """
     Handles requests on objects
@@ -552,6 +556,9 @@ class ObjectController(WSGIContext):
 
         if head:
             app_iter = None
+
+        if 'acl' in args and not head:
+            env['REQUEST_METHOD'] = 'GET'  # recover HTTP method
 
         status = self._get_status_int()
         headers = dict(self._response_headers)
@@ -651,6 +658,8 @@ class ObjectController(WSGIContext):
         kwargs = {'status': HTTP_OK}
         if not acl:
             kwargs['etag'] = self._response_header_value('etag')
+
+        return Response(**kwargs)
 
     def POST(self, env, start_response):
         return get_err_response('AccessDenied')
@@ -773,7 +782,6 @@ class Swift3Middleware(object):
             res = getattr(controller, req.method)(env, start_response)
         else:
             return get_err_response('InvalidURI')(env, start_response)
-
         return res(env, start_response)
 
 
