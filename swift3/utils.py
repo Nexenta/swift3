@@ -40,7 +40,7 @@ REPLACE_USERNAMES = {
 ALLOWED_SUB_RESOURCES = sorted([
     'acl', 'delete', 'lifecycle', 'location', 'logging', 'notification',
     'partNumber', 'policy', 'requestPayment', 'torrent', 'uploads', 'uploadId',
-    'versionId', 'versioning', 'versions ', 'website'
+    'versionId', 'versioning', 'versions', 'website'
 ])
 
 
