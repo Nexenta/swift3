@@ -425,6 +425,14 @@ def canonical_string(req):
     # When using older version, swift3 uses req.path of swob instead
     # of it.
     path = req.environ.get('RAW_PATH_INFO', req.path)
+
+    segs = path.split('/')
+    if len(segs) > 2 and segs[2]:  # segs[2] is object name
+        # We doing this for replace '/' with %2F, because by default quote
+        # don't replace '/' with %2F
+        object_name = quote(unquote('/'.join(segs[2:])), safe='')
+        path = '/'.join(segs[:2] + [object_name])
+
     if req.query_string:
         path += '?' + req.query_string
 
